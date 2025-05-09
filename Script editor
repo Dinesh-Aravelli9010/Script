@@ -1,0 +1,31 @@
+<style type="text/css">
+  /* Header Styling */
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(1),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(2),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(3),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(4),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(5),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(6),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(7),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(8),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(9),
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(10) {
+    background-color: #005594 !important;
+    color: white !important;
+    font-weight: bold !important;
+    border-right: 1px solid #ffffff !important;
+  }
+
+  /* Row Cell Styling (Zebra Striping) */
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > tbody > tr:nth-child(even) td {
+    background-color: #EBECF0 !important;
+  }
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > tbody > tr:nth-child(odd) td {
+    background-color: #FFFFFF !important;
+  }
+
+  /* Optional: Improve table border look */
+  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable td {
+    border: 0.5px solid #808080 !important;
+  }
+</style>
