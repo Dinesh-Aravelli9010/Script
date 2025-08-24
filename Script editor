@@ -1,110 +1,74 @@
 Option Explicit
 
-' =======================
-' Entry point
-' =======================
-Sub SaveGoogleSearchesAsPDF_Edge()
-    Const SHEET_NAME As String = "Sheet1"
-    Const NAME_COL As Long = 1            ' Column A
-    Const ENGINE As String = "https://www.google.com/search?q="
-    
+' ====== USER SETTINGS ======
+Private Const SHEET_NAME As String = "Sheet1"
+Private Const NAME_COL As Long = 1                  ' Column A
+Private Const ENGINE As String = "https://www.google.com/search?q="
+Private Const ENGINE_SUFFIX As String = "&hl=en&gl=IN&pws=0" ' helpful stabilizers
+
+' ====== ENTRY POINT ======
+Sub SaveSearchesAsPDF_AndOpenFolder()
     Dim ws As Worksheet
     Dim lastRow As Long, r As Long
     Dim q As String, url As String
     Dim edgePath As String
     Dim outDir As String, pdfPath As String
-    
+
     On Error GoTo Fail
     Set ws = ThisWorkbook.Worksheets(SHEET_NAME)
     lastRow = ws.Cells(ws.Rows.Count, NAME_COL).End(xlUp).Row
-    
     If lastRow < 1 Then
         MsgBox "No names found in " & SHEET_NAME & ".", vbExclamation
         Exit Sub
     End If
-    
+
     edgePath = GetEdgeExePath()
     If Len(edgePath) = 0 Then
-        MsgBox "Microsoft Edge (msedge.exe) not found." & vbCrLf & _
-               "Please install/update Edge.", vbCritical
+        MsgBox "Microsoft Edge (msedge.exe) not found.", vbCritical
         Exit Sub
     End If
-    
-    outDir = GetOutputFolder()
+
+    outDir = ThisWorkbook.Path & "\SearchPDFs"
     EnsureFolder outDir
-    
+
     For r = 1 To lastRow
         q = Trim$(CStr(ws.Cells(r, NAME_COL).Value))
-        If Len(q) > 0 Then
-            url = ENGINE & UrlEncode(q)
-            pdfPath = outDir & "\" & Left$(SafeFileName(q), 150) & ".pdf"
-            PrintUrlToPdf edgePath, url, pdfPath
-            ' Wait a bit to let Edge write the file before the next one
-            WaitSeconds 3
-        End If
+        If Len(q) = 0 Then GoTo NextRow
+
+        url = ENGINE & UrlEncode(q) & ENGINE_SUFFIX
+        pdfPath = outDir & "\" & Left$(SafeFileName(q), 150) & ".pdf"
+
+        PrintUrlToPdf edgePath, url, pdfPath
+        WaitForFile pdfPath, 12   ' wait up to 12s for file to appear
+
+NextRow:
+        DoEvents
     Next r
-    
-    MsgBox "All done!" & vbCrLf & outDir, vbInformation
+
+    ' ===== Open File Explorer at the output folder =====
+    Shell "explorer.exe " & """" & outDir & """", vbNormalFocus
+    MsgBox "Done! Saved PDFs to:" & vbCrLf & outDir, vbInformation
     Exit Sub
 
 Fail:
     MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical
 End Sub
 
-' =======================
-' Print a single URL to PDF via Edge headless
-' =======================
+' ====== HEADLESS PRINT VIA EDGE ======
 Private Sub PrintUrlToPdf(ByVal edgePath As String, ByVal url As String, ByVal pdfPath As String)
     Dim cmd As String
-    
-    ' Ensure no leftover file blocks writing
     On Error Resume Next
     If Len(Dir$(pdfPath, vbNormal)) > 0 Then Kill pdfPath
     On Error GoTo 0
-    
-    ' Edge headless print to PDF (Chromium flag)
-    ' --headless=new works on recent builds; falls back to --headless if needed.
+
     cmd = """" & edgePath & """" & _
           " --headless=new --disable-gpu --no-sandbox " & _
           " --print-to-pdf=" & """" & pdfPath & """" & _
           " " & """" & url & """"
-    
     Shell cmd, vbHide
-    
-    ' Optional: light polling for file creation (up to ~10s)
-    WaitForFile pdfPath, 10
 End Sub
 
-' =======================
-' Helpers
-' =======================
-Private Function GetOutputFolder() As String
-    GetOutputFolder = ThisWorkbook.Path & "\SearchPDFs"
-End Function
-
-Private Sub EnsureFolder(ByVal folderPath As String)
-    If Len(Dir$(folderPath, vbDirectory)) = 0 Then
-        MkDir folderPath
-    End If
-End Sub
-
-Private Sub WaitSeconds(ByVal s As Double)
-    Dim t As Date
-    t = Now + TimeSerial(0, 0, s)
-    Do While Now < t
-        DoEvents
-    Loop
-End Sub
-
-Private Sub WaitForFile(ByVal fullPath As String, ByVal maxSeconds As Long)
-    Dim t As Date
-    t = Now + TimeSerial(0, 0, maxSeconds)
-    Do
-        If Len(Dir$(fullPath, vbNormal)) > 0 Then Exit Sub
-        DoEvents
-    Loop While Now < t
-End Sub
-
+' ====== HELPERS ======
 Private Function GetEdgeExePath() As String
     Dim p As String
     p = Environ$("ProgramFiles") & "\Microsoft\Edge\Application\msedge.exe"
@@ -114,11 +78,27 @@ Private Function GetEdgeExePath() As String
     GetEdgeExePath = vbNullString
 End Function
 
+Private Sub EnsureFolder(ByVal folderPath As String)
+    If Len(Dir$(folderPath, vbDirectory)) = 0 Then MkDir folderPath
+End Sub
+
 Private Function FileExists(ByVal fullPath As String) As Boolean
     On Error Resume Next
     FileExists = (Len(Dir$(fullPath, vbNormal)) > 0)
     On Error GoTo 0
 End Function
+
+Private Sub WaitForFile(ByVal fullPath As String, ByVal maxSeconds As Long)
+    Dim t As Date
+    t = Now + TimeSerial(0, 0, maxSeconds)
+    Do
+        If Len(Dir$(fullPath, vbNormal)) > 0 Then Exit Sub
+        DoEvents
+        ' small pause
+        Dim pause As Date: pause = Now + TimeSerial(0, 0, 1)
+        Do While Now < pause: DoEvents: Loop
+    Loop While Now < t
+End Sub
 
 Private Function UrlEncode(ByVal s As String) As String
     Dim i As Long, ch As String, code As Long, out As String
@@ -126,11 +106,11 @@ Private Function UrlEncode(ByVal s As String) As String
         ch = Mid$(s, i, 1)
         code = AscW(ch)
         Select Case code
-            Case 48 To 57, 65 To 90, 97 To 122     ' 0-9 A-Z a-z
+            Case 48 To 57, 65 To 90, 97 To 122      ' 0-9 A-Z a-z
                 out = out & ch
-            Case 45, 46, 95, 126                   ' - . _ ~
+            Case 45, 46, 95, 126                    ' - . _ ~
                 out = out & ch
-            Case 32                                 ' space -> +
+            Case 32                                  ' space -> +
                 out = out & "+"
             Case Else
                 out = out & "%" & Right$("0" & Hex(code And &HFF), 2)
@@ -149,5 +129,3 @@ Private Function SafeFileName(ByVal s As String) As String
     If Len(r) = 0 Then r = "Search"
     SafeFileName = r
 End Function
-
-
