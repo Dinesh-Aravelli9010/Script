@@ -1,31 +1,153 @@
-<style type="text/css">
-  /* Header Styling */
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(1),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(2),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(3),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(4),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(5),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(6),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(7),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(8),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(9),
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > thead > tr > th:nth-child(10) {
-    background-color: #005594 !important;
-    color: white !important;
-    font-weight: bold !important;
-    border-right: 1px solid #ffffff !important;
-  }
+Option Explicit
 
-  /* Row Cell Styling (Zebra Striping) */
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > tbody > tr:nth-child(even) td {
-    background-color: #EBECF0 !important;
-  }
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable > tbody > tr:nth-child(odd) td {
-    background-color: #FFFFFF !important;
-  }
+' =======================
+' Entry point
+' =======================
+Sub SaveGoogleSearchesAsPDF_Edge()
+    Const SHEET_NAME As String = "Sheet1"
+    Const NAME_COL As Long = 1            ' Column A
+    Const ENGINE As String = "https://www.google.com/search?q="
+    
+    Dim ws As Worksheet
+    Dim lastRow As Long, r As Long
+    Dim q As String, url As String
+    Dim edgePath As String
+    Dim outDir As String, pdfPath As String
+    
+    On Error GoTo Fail
+    Set ws = ThisWorkbook.Worksheets(SHEET_NAME)
+    lastRow = ws.Cells(ws.Rows.Count, NAME_COL).End(xlUp).Row
+    
+    If lastRow < 1 Then
+        MsgBox "No names found in " & SHEET_NAME & ".", vbExclamation
+        Exit Sub
+    End If
+    
+    edgePath = GetEdgeExePath()
+    If Len(edgePath) = 0 Then
+        MsgBox "Microsoft Edge (msedge.exe) not found." & vbCrLf & _
+               "Please install/update Edge.", vbCritical
+        Exit Sub
+    End If
+    
+    outDir = GetOutputFolder()
+    EnsureFolder outDir
+    
+    For r = 1 To lastRow
+        q = Trim$(CStr(ws.Cells(r, NAME_COL).Value))
+        If Len(q) > 0 Then
+            url = ENGINE & UrlEncode(q)
+            pdfPath = outDir & "\" & Left$(SafeFileName(q), 150) & ".pdf"
+            PrintUrlToPdf edgePath, url, pdfPath
+            ' Wait a bit to let Edge write the file before the next one
+            WaitSeconds 3
+        End If
+    Next r
+    
+    MsgBox "All done!" & vbCrLf & outDir, vbInformation
+    Exit Sub
 
-  /* Optional: Improve table border look */
-  #MSOZoneCell_WebPartWPQ5 table.ms-listviewtable td {
-    border: 0.5px solid #808080 !important;
-  }
-</style>
+Fail:
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical
+End Sub
+
+' =======================
+' Print a single URL to PDF via Edge headless
+' =======================
+Private Sub PrintUrlToPdf(ByVal edgePath As String, ByVal url As String, ByVal pdfPath As String)
+    Dim cmd As String
+    
+    ' Ensure no leftover file blocks writing
+    On Error Resume Next
+    If Len(Dir$(pdfPath, vbNormal)) > 0 Then Kill pdfPath
+    On Error GoTo 0
+    
+    ' Edge headless print to PDF (Chromium flag)
+    ' --headless=new works on recent builds; falls back to --headless if needed.
+    cmd = """" & edgePath & """" & _
+          " --headless=new --disable-gpu --no-sandbox " & _
+          " --print-to-pdf=" & """" & pdfPath & """" & _
+          " " & """" & url & """"
+    
+    Shell cmd, vbHide
+    
+    ' Optional: light polling for file creation (up to ~10s)
+    WaitForFile pdfPath, 10
+End Sub
+
+' =======================
+' Helpers
+' =======================
+Private Function GetOutputFolder() As String
+    GetOutputFolder = ThisWorkbook.Path & "\SearchPDFs"
+End Function
+
+Private Sub EnsureFolder(ByVal folderPath As String)
+    If Len(Dir$(folderPath, vbDirectory)) = 0 Then
+        MkDir folderPath
+    End If
+End Sub
+
+Private Sub WaitSeconds(ByVal s As Double)
+    Dim t As Date
+    t = Now + TimeSerial(0, 0, s)
+    Do While Now < t
+        DoEvents
+    Loop
+End Sub
+
+Private Sub WaitForFile(ByVal fullPath As String, ByVal maxSeconds As Long)
+    Dim t As Date
+    t = Now + TimeSerial(0, 0, maxSeconds)
+    Do
+        If Len(Dir$(fullPath, vbNormal)) > 0 Then Exit Sub
+        DoEvents
+    Loop While Now < t
+End Sub
+
+Private Function GetEdgeExePath() As String
+    Dim p As String
+    p = Environ$("ProgramFiles") & "\Microsoft\Edge\Application\msedge.exe"
+    If FileExists(p) Then GetEdgeExePath = p: Exit Function
+    p = Environ$("ProgramFiles(x86)") & "\Microsoft\Edge\Application\msedge.exe"
+    If FileExists(p) Then GetEdgeExePath = p: Exit Function
+    GetEdgeExePath = vbNullString
+End Function
+
+Private Function FileExists(ByVal fullPath As String) As Boolean
+    On Error Resume Next
+    FileExists = (Len(Dir$(fullPath, vbNormal)) > 0)
+    On Error GoTo 0
+End Function
+
+Private Function UrlEncode(ByVal s As String) As String
+    Dim i As Long, ch As String, code As Long, out As String
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        code = AscW(ch)
+        Select Case code
+            Case 48 To 57, 65 To 90, 97 To 122     ' 0-9 A-Z a-z
+                out = out & ch
+            Case 45, 46, 95, 126                   ' - . _ ~
+                out = out & ch
+            Case 32                                 ' space -> +
+                out = out & "+"
+            Case Else
+                out = out & "%" & Right$("0" & Hex(code And &HFF), 2)
+        End Select
+    Next i
+    UrlEncode = out
+End Function
+
+Private Function SafeFileName(ByVal s As String) As String
+    Dim bad As Variant, i As Long, r As String
+    r = Trim$(s)
+    bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+    For i = LBound(bad) To UBound(bad)
+        r = Replace$(r, CStr(bad(i)), "_")
+    Next i
+    If Len(r) = 0 Then r = "Search"
+    SafeFileName = r
+End Function
+
+
