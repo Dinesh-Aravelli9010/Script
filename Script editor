@@ -1,182 +1,122 @@
 Option Explicit
 
-' =========================
-' SETTINGS – EDIT THESE
-' =========================
+' ====== USER SETTINGS ======
 Private Const SHEET_NAME As String = "Sheet1"
-Private Const NAME_COL As Long = 1                    ' Column A with names
+Private Const NAMES_ROW As Long = 11      ' you were reading across row 11
+Private Const START_COL As Long = 5
 
-Private Const SITE_URL As String = "https://your-owls-site.example/search"  ' <-- your page
-Private Const TABS_BEFORE_INPUT As Long = 1           ' Adjust to reach the name input
-Private Const SUBMIT_KEY As String = "~"              ' "~" = Enter, or try "{SPACE}" if needed
-Private Const PAGE_LOAD_WAIT As Double = 4.0          ' Seconds to wait after submit
+Private Const OWLS_BASE As String = "https://47971ow-src-p.bankofamerica.com/owls" ' keep full https://
+Private Const INPUT_CSS As String = "input[name='q']"       ' adjust if different
+Private Const BUTTON_CSS As String = "button[type='submit']" ' or keep Enter submit
 
-' Open Explorer at the end
-Private Const OPEN_FOLDER_AT_END As Boolean = True
+Private Const OUT_SUBFOLDER As String = "SearchPDFs"
+Private Const PROFILE_DIR As String = "Default" ' Chrome profile to reuse (cookies/SSO)
+' ===============================================
 
-' =========================
-' ENTRY POINT
-' =========================
-Public Sub Chrome_SendKeys_Search_SavePDF()
-    Dim ws As Worksheet
-    Dim lastRow As Long, r As Long
-    Dim q As String, url As String
-    Dim outDir As String, pdfPath As String
-    Dim chromePath As String
-
-    On Error GoTo Fail
+Public Sub Owls_Search_With_CDP_PrintPDF()
+    Dim ws As Worksheet, lastCol As Long, c As Long
+    Dim q As String, url As String, pdfPath As String, outDir As String
+    Dim userDataDir As String, chromePath As String
+    Dim chrome As Object     ' CDPBrowser (your wrapper)
+    Dim pageId As String
 
     Set ws = ThisWorkbook.Worksheets(SHEET_NAME)
-    lastRow = ws.Cells(ws.Rows.Count, NAME_COL).End(xlUp).Row
-    If lastRow < 1 Then
-        MsgBox "No names found in " & SHEET_NAME & ".", vbExclamation
+
+    lastCol = ws.Cells(NAMES_ROW, ws.Columns.Count).End(xlToLeft).Column
+    If lastCol < START_COL Then
+        MsgBox "No names found on row " & NAMES_ROW & ".", vbExclamation
         Exit Sub
     End If
 
     chromePath = GetChromeExePath()
-    If Len(chromePath) = 0 Then
-        MsgBox "Google Chrome (chrome.exe) not found.", vbCritical
+    If chromePath = "" Then
+        MsgBox "Chrome not found.", vbCritical
         Exit Sub
     End If
 
-    outDir = ThisWorkbook.Path & "\SearchPDFs"
+    userDataDir = Environ$("LOCALAPPDATA") & "\Google\Chrome\User Data"
+
+    ' --- 1) Launch Chrome via CDP with your profile (avoids blank/SSO issues)
+    Set chrome = CreateObject("CDPBrowser")           ' your wrapper class/progID
+    ' Common signature: Start chrome with debugging port + profile
+    ' Map to your wrapper's start/launch call:
+    '   .Start chromePath, remoteDebugPort, userDataDir, profileName, headless
+    chrome.Start chromePath, 9222, userDataDir, PROFILE_DIR, False
+
+    ' --- 2) New page and activate it (fixes about:blank target issues)
+    pageId = chrome.NewPage("about:blank")            ' returns target/page id
+    chrome.ActivatePage pageId
+
+    outDir = ThisWorkbook.Path & "\" & OUT_SUBFOLDER
     EnsureFolder outDir
 
-    ' Launch Chrome once (visible) to about:blank so we can drive it
-    Shell """" & chromePath & """ ""about:blank""", vbNormalFocus
-    WaitSeconds 1.2
-    AppActivateChrome
+    For c = START_COL To lastCol
+        q = Trim$(CStr(ws.Cells(NAMES_ROW, c).Value))
+        If Len(q) = 0 Then GoTo NextName
 
-    For r = 1 To lastRow
-        q = Trim$(CStr(ws.Cells(r, NAME_COL).Value))
-        If Len(q) = 0 Then GoTo NextRow
+        ' --- 3) Navigate to OWLS (base page first, then set q and submit)
+        chrome.Navigate pageId, OWLS_BASE              ' e.g., https://.../owls
+        WaitForDomReady chrome, pageId, 30000          ' <= **CRITICAL**: wait
 
-        ' 1) Navigate to the site
-        AppActivateChrome
-        SendKeys "^{l}", True                    ' Ctrl+L -> focus address bar
-        WaitSeconds 0.15
-        SendKeys SITE_URL, True
-        WaitSeconds 0.05
-        SendKeys "~", True                       ' Enter to navigate
-        WaitSeconds 2.0                          ' Give initial page time to render
-
-        ' 2) TAB to the input (tune TABS_BEFORE_INPUT), paste the name, submit
-        SendTabs TABS_BEFORE_INPUT
-        PutOnClipboard q
-        SendKeys "^v", True                      ' paste the name
-        WaitSeconds 0.1
-        SendKeys SUBMIT_KEY, True                ' Enter (or Space) to submit
-        WaitSeconds PAGE_LOAD_WAIT               ' wait for results page to load
-
-        ' 3) Copy the current URL from the address bar
-        AppActivateChrome
-        SendKeys "^{l}", True
-        WaitSeconds 0.1
-        SendKeys "^c", True
-        WaitSeconds 0.1
-        url = GetClipboardText()
-
-        ' 4) Save that URL as PDF using Chrome headless
-        If Len(url) > 0 Then
-            pdfPath = outDir & "\" & Left$(SafeFileName(q), 150) & ".pdf"
-            PrintUrlToPdf_Chrome chromePath, url, pdfPath
-            WaitForFile pdfPath, 12
+        ' --- 4) Type name into the box and submit
+        If Not chrome.ElementExists(pageId, INPUT_CSS) Then
+            ' sometimes the page is a redirect; reload once
+            chrome.Reload pageId
+            WaitForDomReady chrome, pageId, 30000
         End If
 
-        ' 5) Optional: close the tab to keep Chrome tidy
-        AppActivateChrome
-        SendKeys "^{w}", True
-        WaitSeconds 0.2
+        ' set value and submit (two safe options)
+        chrome.SetValueByQuery pageId, INPUT_CSS, q            ' wrapper: value = q
+        ' EITHER press Enter on the input:
+        chrome.DispatchKeyByQuery pageId, INPUT_CSS, 13        ' 13 = Enter
+        ' OR click the button (uncomment if your site needs a click)
+        'chrome.ClickByQuery pageId, BUTTON_CSS
 
-NextRow:
+        ' --- 5) Wait for results to load (URL/DOM changes)
+        WaitForDomReady chrome, pageId, 30000
+
+        ' --- 6) Print current page to PDF via CDP (no separate headless process)
+        pdfPath = outDir & "\" & Left$(SafeFileName(q), 150) & ".pdf"
+        PrintCurrentPageToPDF chrome, pageId, pdfPath
+
+NextName:
         DoEvents
-    Next r
+    Next c
 
-    If OPEN_FOLDER_AT_END Then Shell "explorer.exe " & """" & outDir & """", vbNormalFocus
-    MsgBox "Done! PDFs saved to:" & vbCrLf & outDir, vbInformation
-    Exit Sub
+    chrome.CloseAllPages
+    chrome.Quit
 
-Fail:
-    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Shell "explorer.exe " & """" & outDir & """", vbNormalFocus
+    MsgBox "Done. PDFs in: " & outDir, vbInformation
 End Sub
 
-' =========================
-' Chrome Headless PDF save
-' =========================
-Private Sub PrintUrlToPdf_Chrome(ByVal chromePath As String, ByVal url As String, ByVal pdfPath As String)
-    Dim cmd As String
+' ====== CDP UTILITIES ======
+Private Sub WaitForDomReady(ByVal chrome As Object, ByVal pageId As String, ByVal timeoutMs As Long)
+    Dim t0 As Single: t0 = Timer
+    Do
+        ' Many wrappers expose Page.loadEventFired / Network.loadingFinished or a helper like IsDomReady
+        If chrome.IsDomReady(pageId) Then Exit Sub
+
+        ' Fallback: poll document.readyState
+        If chrome.Evaluate(pageId, "document.readyState") = "complete" Then Exit Sub
+
+        DoEvents
+        If (Timer - t0) * 1000 > timeoutMs Then Exit Do
+    Loop
+End Sub
+
+Private Sub PrintCurrentPageToPDF(ByVal chrome As Object, ByVal pageId As String, ByVal pdfPath As String)
+    Dim b64 As String
     On Error Resume Next
     If Len(Dir$(pdfPath, vbNormal)) > 0 Then Kill pdfPath
     On Error GoTo 0
 
-    cmd = """" & chromePath & """" & _
-          " --headless=new --disable-gpu --no-sandbox" & _
-          " --print-to-pdf=" & """" & pdfPath & """" & _
-          " " & """" & url & """"
-
-    Shell cmd, vbHide
+    ' Most CDP wrappers expose Page.printToPDF -> base64 string
+    b64 = chrome.PrintToPDF(pageId, True, False, 1#)  ' (printBackground, landscape, scale)
+    If Len(b64) > 0 Then SaveBase64ToFile b64, pdfPath
 End Sub
 
-' =========================
-' Window focus & SendKeys helpers
-' =========================
-Private Sub AppActivateChrome()
-    On Error Resume Next
-    AppActivate "Google Chrome"
-    On Error GoTo 0
-    WaitSeconds 0.15
-End Sub
-
-Private Sub SendTabs(ByVal n As Long)
-    Dim i As Long
-    For i = 1 To n
-        SendKeys "{TAB}", True
-        WaitSeconds 0.05
-    Next i
-End Sub
-
-Private Sub WaitSeconds(ByVal s As Double)
-    Dim t As Date
-    t = Now + (s / 86400#)
-    Do While Now < t
-        DoEvents
-    Loop
-End Sub
-
-Private Sub WaitForFile(ByVal fullPath As String, ByVal maxSeconds As Long)
-    Dim deadline As Date
-    deadline = Now + TimeSerial(0, 0, maxSeconds)
-    Do
-        If Len(Dir$(fullPath, vbNormal)) > 0 Then Exit Sub
-        DoEvents
-        WaitSeconds 0.2
-    Loop While Now < deadline
-End Sub
-
-' =========================
-' Clipboard helpers (no refs)
-' =========================
-Private Sub PutOnClipboard(ByVal s As String)
-    Dim oData As Object
-    Set oData = CreateObject("Forms.DataObject")
-    oData.SetText s
-    oData.PutInClipboard
-End Sub
-
-Private Function GetClipboardText() As String
-    Dim oData As Object
-    On Error GoTo EH
-    Set oData = CreateObject("Forms.DataObject")
-    oData.GetFromClipboard
-    GetClipboardText = oData.GetText
-    Exit Function
-EH:
-    GetClipboardText = vbNullString
-End Function
-
-' =========================
-' Paths / Files
-' =========================
+' ====== GENERIC HELPERS ======
 Private Function GetChromeExePath() As String
     Dim p As String
     p = Environ$("ProgramFiles") & "\Google\Chrome\Application\chrome.exe"
@@ -197,7 +137,7 @@ Private Sub EnsureFolder(ByVal folderPath As String)
 End Sub
 
 Private Function SafeFileName(ByVal s As String) As String
-    Dim bad As Variant, i As Long, r As String
+    Dim bad, i As Long, r As String
     r = Trim$(s)
     bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
     For i = LBound(bad) To UBound(bad)
@@ -205,4 +145,24 @@ Private Function SafeFileName(ByVal s As String) As String
     Next i
     If Len(r) = 0 Then r = "Search"
     SafeFileName = r
+End Function
+
+' Save CDP Page.printToPDF base64 -> file
+Private Sub SaveBase64ToFile(ByVal b64 As String, ByVal path As String)
+    Dim bytes() As Byte
+    bytes = Base64Decode(b64)
+    Dim ff As Integer: ff = FreeFile
+    Open path For Binary As #ff
+    Put #ff, , bytes
+    Close #ff
+End Sub
+
+' Simple base64 decoder (late-bound ADODB)
+Private Function Base64Decode(ByVal b64 As String) As Byte()
+    Dim xml As Object, node As Object
+    Set xml = CreateObject("MSXML2.DOMDocument")
+    Set node = xml.createElement("tmp")
+    node.DataType = "bin.base64"
+    node.Text = b64
+    Base64Decode = node.nodeTypedValue
 End Function
