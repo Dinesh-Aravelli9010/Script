@@ -1,240 +1,208 @@
-' ================== Module: Owls_ToPDF_Auto.bas ==================
-' Paste this into a standard module and run:  Entity_DBA_Trade_AKA_FKA_Name_ALL
-' Office 365, pure VBA, no references. Uses Edge/Chrome DevTools Protocol.
-
 Option Explicit
 
-' ---------- CHANGE THESE IF NEEDED ----------
-Private Const SHEET_NAME As String = "Dashboard"
-Private Const NAMES_ROW As Long = 11        ' row with names (E11..)
-Private Const OUTFOLDER_CELL As String = "C1"
-Private Const FIRST_NAME_COL As Long = 5    ' E = 5
-Private Const FILE_PREFIX As String = "Entity_DBA_Trade_AKA_FKA_Name_"
-Private Const OWLS_BASE As String = "https://47971ow-src-p.bankofamerica.com/owls?q="
-' -------------------------------------------
+' =========================
+' SETTINGS – EDIT THESE
+' =========================
+Private Const SHEET_NAME As String = "Sheet1"
+Private Const NAME_COL As Long = 1                    ' Column A with names
 
-' DevTools port
-Private Const CDP_PORT As Long = 9222
+Private Const SITE_URL As String = "https://your-owls-site.example/search"  ' <-- your page
+Private Const TABS_BEFORE_INPUT As Long = 1           ' Adjust to reach the name input
+Private Const SUBMIT_KEY As String = "~"              ' "~" = Enter, or try "{SPACE}" if needed
+Private Const PAGE_LOAD_WAIT As Double = 4.0          ' Seconds to wait after submit
 
-' ====== PUBLIC ENTRY ======
-Public Sub Entity_DBA_Trade_AKA_FKA_Name_ALL()
-    Dim ws As Worksheet: Set ws = ThisWorkbook.Sheets(SHEET_NAME)
-    Dim outFolder As String: outFolder = Trim$(ws.Range(OUTFOLDER_CELL).Value)
-    If Len(outFolder) = 0 Then
-        MsgBox "Please put the output folder path in " & SHEET_NAME & "!" & OUTFOLDER_CELL, vbExclamation
+' Open Explorer at the end
+Private Const OPEN_FOLDER_AT_END As Boolean = True
+
+' =========================
+' ENTRY POINT
+' =========================
+Public Sub Chrome_SendKeys_Search_SavePDF()
+    Dim ws As Worksheet
+    Dim lastRow As Long, r As Long
+    Dim q As String, url As String
+    Dim outDir As String, pdfPath As String
+    Dim chromePath As String
+
+    On Error GoTo Fail
+
+    Set ws = ThisWorkbook.Worksheets(SHEET_NAME)
+    lastRow = ws.Cells(ws.Rows.Count, NAME_COL).End(xlUp).Row
+    If lastRow < 1 Then
+        MsgBox "No names found in " & SHEET_NAME & ".", vbExclamation
         Exit Sub
     End If
-    If Right$(outFolder, 1) <> "\" Then outFolder = outFolder & "\"
-    If Dir(outFolder, vbDirectory) = "" Then MkDir outFolder
-    
-    ' Start Edge/Chrome with CDP
-    StartBrowserWithCDP
-    
-    Dim lastCol As Long, c As Long, nm As String
-    Dim url As String, pdfPath As String, targetId As String
-    
-    lastCol = ws.Cells(NAMES_ROW, ws.Columns.Count).End(xlToLeft).Column
-    If lastCol < FIRST_NAME_COL Then
-        MsgBox "No names found in row " & NAMES_ROW & " from column E onward.", vbExclamation
+
+    chromePath = GetChromeExePath()
+    If Len(chromePath) = 0 Then
+        MsgBox "Google Chrome (chrome.exe) not found.", vbCritical
         Exit Sub
     End If
-    
-    Application.ScreenUpdating = False
-    For c = FIRST_NAME_COL To lastCol
-        nm = Trim$(ws.Cells(NAMES_ROW, c).Value)
-        If nm = "" Then Exit For
-        
-        targetId = CreateTab("about:blank")
-        url = OWLS_BASE & URLEncode(nm)
-        Navigate targetId, url
-        WaitMs 2500
-        
-        pdfPath = outFolder & FILE_PREFIX & CleanFileName(nm) & ".pdf"
-        SaveCurrentPageAsPDF targetId, pdfPath, 1#, True
-        CloseTarget targetId
-    Next c
-    Application.ScreenUpdating = True
-    
-    MsgBox "Done. PDFs saved to: " & outFolder, vbInformation
+
+    outDir = ThisWorkbook.Path & "\SearchPDFs"
+    EnsureFolder outDir
+
+    ' Launch Chrome once (visible) to about:blank so we can drive it
+    Shell """" & chromePath & """ ""about:blank""", vbNormalFocus
+    WaitSeconds 1.2
+    AppActivateChrome
+
+    For r = 1 To lastRow
+        q = Trim$(CStr(ws.Cells(r, NAME_COL).Value))
+        If Len(q) = 0 Then GoTo NextRow
+
+        ' 1) Navigate to the site
+        AppActivateChrome
+        SendKeys "^{l}", True                    ' Ctrl+L -> focus address bar
+        WaitSeconds 0.15
+        SendKeys SITE_URL, True
+        WaitSeconds 0.05
+        SendKeys "~", True                       ' Enter to navigate
+        WaitSeconds 2.0                          ' Give initial page time to render
+
+        ' 2) TAB to the input (tune TABS_BEFORE_INPUT), paste the name, submit
+        SendTabs TABS_BEFORE_INPUT
+        PutOnClipboard q
+        SendKeys "^v", True                      ' paste the name
+        WaitSeconds 0.1
+        SendKeys SUBMIT_KEY, True                ' Enter (or Space) to submit
+        WaitSeconds PAGE_LOAD_WAIT               ' wait for results page to load
+
+        ' 3) Copy the current URL from the address bar
+        AppActivateChrome
+        SendKeys "^{l}", True
+        WaitSeconds 0.1
+        SendKeys "^c", True
+        WaitSeconds 0.1
+        url = GetClipboardText()
+
+        ' 4) Save that URL as PDF using Chrome headless
+        If Len(url) > 0 Then
+            pdfPath = outDir & "\" & Left$(SafeFileName(q), 150) & ".pdf"
+            PrintUrlToPdf_Chrome chromePath, url, pdfPath
+            WaitForFile pdfPath, 12
+        End If
+
+        ' 5) Optional: close the tab to keep Chrome tidy
+        AppActivateChrome
+        SendKeys "^{w}", True
+        WaitSeconds 0.2
+
+NextRow:
+        DoEvents
+    Next r
+
+    If OPEN_FOLDER_AT_END Then Shell "explorer.exe " & """" & outDir & """", vbNormalFocus
+    MsgBox "Done! PDFs saved to:" & vbCrLf & outDir, vbInformation
+    Exit Sub
+
+Fail:
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical
 End Sub
 
-' ================= BROWSER LIFECYCLE =================
-Private Sub StartBrowserWithCDP()
-    If IsCDPAlive Then Exit Sub
-    
-    Dim exe As String: exe = FindBrowserPath()
-    If exe = "" Then
-        MsgBox "Neither Edge nor Chrome was found. Please install one.", vbCritical
-        End
-    End If
-    
+' =========================
+' Chrome Headless PDF save
+' =========================
+Private Sub PrintUrlToPdf_Chrome(ByVal chromePath As String, ByVal url As String, ByVal pdfPath As String)
     Dim cmd As String
-    cmd = """" & exe & """ --remote-debugging-port=" & CDP_PORT & _
-          " --user-data-dir=""%LOCALAPPDATA%\CDP_VBA_Profile"" --no-first-run --no-default-browser-check"
-    Shell cmd, vbNormalFocus
-    
-    Dim t As Single: t = Timer
-    Do While Not IsCDPAlive
+    On Error Resume Next
+    If Len(Dir$(pdfPath, vbNormal)) > 0 Then Kill pdfPath
+    On Error GoTo 0
+
+    cmd = """" & chromePath & """" & _
+          " --headless=new --disable-gpu --no-sandbox" & _
+          " --print-to-pdf=" & """" & pdfPath & """" & _
+          " " & """" & url & """"
+
+    Shell cmd, vbHide
+End Sub
+
+' =========================
+' Window focus & SendKeys helpers
+' =========================
+Private Sub AppActivateChrome()
+    On Error Resume Next
+    AppActivate "Google Chrome"
+    On Error GoTo 0
+    WaitSeconds 0.15
+End Sub
+
+Private Sub SendTabs(ByVal n As Long)
+    Dim i As Long
+    For i = 1 To n
+        SendKeys "{TAB}", True
+        WaitSeconds 0.05
+    Next i
+End Sub
+
+Private Sub WaitSeconds(ByVal s As Double)
+    Dim t As Date
+    t = Now + (s / 86400#)
+    Do While Now < t
         DoEvents
-        If Timer - t > 8 Then Exit Do
     Loop
 End Sub
 
-Private Function FindBrowserPath() As String
-    ' Try common Edge paths, then Chrome, then exe name on PATH
-    Dim p As String
-    p = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-    If Dir(p, vbNormal) <> "" Then FindBrowserPath = p: Exit Function
-    p = "C:\Program Files\Microsoft\Edge\Application\msedge.exe"
-    If Dir(p, vbNormal) <> "" Then FindBrowserPath = p: Exit Function
-    p = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-    If Dir(p, vbNormal) <> "" Then FindBrowserPath = p: Exit Function
-    p = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-    If Dir(p, vbNormal) <> "" Then FindBrowserPath = p: Exit Function
-    FindBrowserPath = "msedge.exe" ' hope it's on PATH; else chrome.exe
-End Function
+Private Sub WaitForFile(ByVal fullPath As String, ByVal maxSeconds As Long)
+    Dim deadline As Date
+    deadline = Now + TimeSerial(0, 0, maxSeconds)
+    Do
+        If Len(Dir$(fullPath, vbNormal)) > 0 Then Exit Sub
+        DoEvents
+        WaitSeconds 0.2
+    Loop While Now < deadline
+End Sub
 
-Private Function IsCDPAlive() As Boolean
-    On Error GoTo e
-    IsCDPAlive = (Len(HttpGet("http://127.0.0.1:" & CDP_PORT & "/json/version")) > 0)
+' =========================
+' Clipboard helpers (no refs)
+' =========================
+Private Sub PutOnClipboard(ByVal s As String)
+    Dim oData As Object
+    Set oData = CreateObject("Forms.DataObject")
+    oData.SetText s
+    oData.PutInClipboard
+End Sub
+
+Private Function GetClipboardText() As String
+    Dim oData As Object
+    On Error GoTo EH
+    Set oData = CreateObject("Forms.DataObject")
+    oData.GetFromClipboard
+    GetClipboardText = oData.GetText
     Exit Function
-e:
-    IsCDPAlive = False
+EH:
+    GetClipboardText = vbNullString
 End Function
 
-' ================== CDP PRIMITIVES ==================
-Private Function CreateTab(initialUrl As String) As String
-    Dim resp As String
-    resp = HttpGet("http://127.0.0.1:" & CDP_PORT & "/json/new?url=" & URLEncode(initialUrl))
-    CreateTab = JsonPick(resp, "id")
+' =========================
+' Paths / Files
+' =========================
+Private Function GetChromeExePath() As String
+    Dim p As String
+    p = Environ$("ProgramFiles") & "\Google\Chrome\Application\chrome.exe"
+    If FileExists(p) Then GetChromeExePath = p: Exit Function
+    p = Environ$("ProgramFiles(x86)") & "\Google\Chrome\Application\chrome.exe"
+    If FileExists(p) Then GetChromeExePath = p: Exit Function
+    GetChromeExePath = vbNullString
 End Function
 
-Private Sub CloseTarget(targetId As String)
-    Call HttpGet("http://127.0.0.1:" & CDP_PORT & "/json/close/" & targetId)
+Private Function FileExists(ByVal fullPath As String) As Boolean
+    On Error Resume Next
+    FileExists = (Len(Dir$(fullPath, vbNormal)) > 0)
+    On Error GoTo 0
+End Function
+
+Private Sub EnsureFolder(ByVal folderPath As String)
+    If Len(Dir$(folderPath, vbDirectory)) = 0 Then MkDir folderPath
 End Sub
 
-Private Sub Navigate(targetId As String, url As String)
-    CDPSend targetId, "Page.enable", "{}"
-    CDPSend targetId, "Runtime.enable", "{}"
-    CDPSend targetId, "Page.navigate", "{""url"":" & JsonStr(url) & "}"
-End Sub
-
-Private Sub SaveCurrentPageAsPDF(targetId As String, filePath As String, _
-                                 Optional scale As Double = 1#, Optional printBackground As Boolean = True)
-    Dim resp As String, b64 As String, params As String
-    params = "{""scale"":" & Replace(CStr(scale), ",", ".") & _
-             ",""printBackground"":" & LCase$(CStr(printBackground)) & _
-             ",""landscape"":false,""paperWidth"":8.27,""paperHeight"":11.69}"
-    resp = CDPSend(targetId, "Page.printToPDF", params)
-    b64 = JsonPick(resp, "data")
-    If Len(b64) = 0 Then Err.Raise 5, , "printToPDF returned empty data (page may need login)."
-    SaveBase64 filePath, b64
-End Sub
-
-Private Function CDPSend(targetId As String, method As String, params As String) As String
-    Dim resp As String, sid As String, payload As String, outer As String
-    resp = BrowserSend("Target.attachToTarget", "{""targetId"":""" & targetId & """,""flatten"":true}")
-    sid = JsonPick(resp, "sessionId")
-    
-    payload = "{""id"":1,""method"":""" & method & """,""params"":" & params & "}"
-    outer = "{""sessionId"":""" & sid & """,""message"":" & JsonStr(payload) & "}"
-    resp = BrowserSend("Target.sendMessageToTarget", outer)
-    
-    BrowserSend "Target.detachFromTarget", "{""sessionId"":""" & sid & """}"
-    CDPSend = resp
-End Function
-
-Private Function BrowserSend(method As String, params As String) As String
-    Static msgId As Long
-    msgId = msgId + 1
-    Dim body As String
-    body = "{""id"":" & msgId & ",""method"":""" & method & """,""params"":" & params & "}"
-    BrowserSend = HttpPost("http://127.0.0.1:" & CDP_PORT & "/json/protocol", body, True)
-End Function
-
-' ================= HTTP & UTILITIES =================
-Private Function HttpGet(url As String) As String
-    Dim w As Object: Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
-    w.Open "GET", url, False
-    w.Send
-    HttpGet = w.ResponseText
-End Function
-
-Private Function HttpPost(url As String, body As String, Optional json As Boolean = True) As String
-    Dim w As Object: Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
-    w.Open "POST", url, False
-    If json Then w.SetRequestHeader "Content-Type", "application/json;charset=UTF-8"
-    w.Send body
-    HttpPost = w.ResponseText
-End Function
-
-Private Function JsonStr(s As String) As String
-    s = Replace(s, "\", "\\")
-    s = Replace(s, """", "\""")
-    s = Replace(s, vbCrLf, "\n")
-    s = Replace(s, vbCr, "\n")
-    s = Replace(s, vbLf, "\n")
-    JsonStr = """" & s & """"
-End Function
-
-Private Function JsonPick(json As String, key As String) As String
-    ' picks simple "key":"value"
-    Dim p As Long, q As Long
-    p = InStr(1, json, """" & key & """:", vbTextCompare)
-    If p = 0 Then Exit Function
-    p = InStr(p + Len(key) + 3, json, """")
-    q = InStr(p + 1, json, """")
-    JsonPick = Mid$(json, p + 1, q - p - 1)
-End Function
-
-Private Function URLEncode(ByVal s As String) As String
-    Dim i As Long, ch As String, o As String
-    For i = 1 To Len(s)
-        ch = Mid$(s, i, 1)
-        Select Case AscW(ch)
-            Case 48 To 57, 65 To 90, 97 To 122, 45, 46, 95, 126
-                o = o & ch
-            Case Else
-                o = o & "%" & Right$("0" & Hex(AscW(ch)), 2)
-        End Select
-    Next
-    URLEncode = o
-End Function
-
-Private Function CleanFileName(s As String) As String
-    Dim bad As Variant, i As Long
+Private Function SafeFileName(ByVal s As String) As String
+    Dim bad As Variant, i As Long, r As String
+    r = Trim$(s)
     bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
     For i = LBound(bad) To UBound(bad)
-        s = Replace(s, bad(i), "_")
-    Next
-    CleanFileName = s
+        r = Replace$(r, CStr(bad(i)), "_")
+    Next i
+    If Len(r) = 0 Then r = "Search"
+    SafeFileName = r
 End Function
-
-Private Sub SaveBase64(path As String, b64 As String)
-    Dim stm As Object, bytes() As Byte
-    bytes = Base64Decode(b64)
-    Set stm = CreateObject("ADODB.Stream")
-    With stm
-        .Type = 1: .Open
-        .Write bytes
-        .SaveToFile path, 2
-        .Close
-    End With
-End Sub
-
-Private Function Base64Decode(ByVal sB64 As String) As Byte()
-    Dim XML As Object, Node As Object
-    Set XML = CreateObject("MSXML2.DOMDocument")
-    Set Node = XML.createElement("b64")
-    Node.DataType = "bin.base64"
-    Node.Text = sB64
-    Base64Decode = Node.nodeTypedValue
-End Function
-
-Private Sub WaitMs(ms As Long)
-    Dim t As Single: t = Timer
-    Do
-        DoEvents
-    Loop While (Timer - t) * 1000 < ms
-End Sub
-' ================= END MODULE =================
