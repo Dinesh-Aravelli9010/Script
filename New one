@@ -1,0 +1,262 @@
+Option Explicit
+
+' ======= YOU CAN TWEAK THESE =======
+Private Const PDF_DIR As String = "C:\Users\Dinesh\Desktop\SearchPDFs\"
+Private Const PRINT_SCALE As Double = 1#
+Private Const PRINT_BG As Boolean = True
+Private Const CDP_PORT As Long = 9222
+' ===================================
+
+Sub Entity_DBA_Trade_AKA_FKA_Name_Google_Edge_Screenshot()
+    Dim ws As Worksheet, names As Collection
+    Dim i As Long, nm As Variant
+    Dim targetId As String
+    Dim pid As Long
+    
+    ' === Collect names from ACTIVE sheet, row 11, columns E→... until first blank ===
+    Set ws = ActiveSheet
+    Set names = New Collection
+    For i = 5 To ws.Columns.Count
+        Dim v As String
+        v = Trim$(CStr(ws.Cells(11, i).Value))
+        If v = "" Then Exit For
+        names.Add v
+    Next i
+    If names.Count = 0 Then
+        MsgBox "No names found on " & ws.Name & " in row 11 from column E.", vbExclamation
+        Exit Sub
+    End If
+    
+    ' === Output folder ===
+    If Dir(PDF_DIR, vbDirectory) = vbNullString Then MkDir PDF_DIR
+    
+    ' === Start Edge with DevTools (CDP) ===
+    StartEdgeWithCDP
+    
+    ' === Each name: open Google results → save p1, p2, ... until no Next ===
+    For Each nm In names
+        targetId = CreateTab("about:blank")
+        Navigate targetId, "https://www.google.com/search?q=" & URLEncode(CStr(nm))
+        WaitMs 2500
+        
+        Dim pageN As Long: pageN = 1
+        Do
+            ' Save current page as a real PDF
+            SaveCurrentPageAsPDF targetId, PDF_DIR & _
+                "Entity_DBA_Trade_AKA_FKA_Name_" & CleanFileName(CStr(nm)) & "_p" & pageN & ".pdf", PRINT_SCALE, PRINT_BG
+            
+            ' Check for Next button (#pnnext). If not present, stop.
+            If Not HasNextButton(targetId) Then Exit Do
+            
+            ' Click Next and wait a moment
+            ClickNext targetId
+            WaitMs 1500
+            pageN = pageN + 1
+        Loop
+        
+        CloseTarget targetId
+    Next nm
+    
+    MsgBox "Done. PDFs saved to: " & PDF_DIR, vbInformation
+End Sub
+
+' ====================== CDP / BROWSER ======================
+
+Private Sub StartEdgeWithCDP()
+    If IsCDPAlive Then Exit Sub
+    Dim exe As String
+    exe = FindEdgePath()
+    If exe = "" Then
+        MsgBox "Microsoft Edge not found.", vbCritical
+        End
+    End If
+    
+    Dim cmd As String
+    cmd = """" & exe & """ --remote-debugging-port=" & CDP_PORT & _
+          " --user-data-dir=""%LOCALAPPDATA%\CDP_VBA_Profile""" & _
+          " --no-first-run --no-default-browser-check"
+    Shell cmd, vbNormalFocus
+    
+    Dim t As Single: t = Timer
+    Do While Not IsCDPAlive
+        DoEvents
+        If Timer - t > 8 Then Exit Do
+    Loop
+End Sub
+
+Private Function FindEdgePath() As String
+    Dim p1 As String, p2 As String
+    p1 = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    p2 = "C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    If Dir(p1, vbNormal) <> "" Then FindEdgePath = p1: Exit Function
+    If Dir(p2, vbNormal) <> "" Then FindEdgePath = p2: Exit Function
+    FindEdgePath = ""
+End Function
+
+Private Function IsCDPAlive() As Boolean
+    On Error GoTo e
+    IsCDPAlive = (Len(HttpGet("http://127.0.0.1:" & CDP_PORT & "/json/version")) > 0)
+    Exit Function
+e:
+    IsCDPAlive = False
+End Function
+
+Private Function CreateTab(initialUrl As String) As String
+    Dim resp As String
+    resp = HttpGet("http://127.0.0.1:" & CDP_PORT & "/json/new?url=" & URLEncode(initialUrl))
+    CreateTab = JsonPick(resp, "id")
+End Function
+
+Private Sub CloseTarget(targetId As String)
+    Call HttpGet("http://127.0.0.1:" & CDP_PORT & "/json/close/" & targetId)
+End Sub
+
+Private Sub Navigate(targetId As String, url As String)
+    CDPSend targetId, "Page.enable", "{}"
+    CDPSend targetId, "Runtime.enable", "{}"
+    CDPSend targetId, "Page.navigate", "{""url"":" & JsonStr(url) & "}"
+End Sub
+
+Private Sub SaveCurrentPageAsPDF(targetId As String, filePath As String, _
+                                 Optional scale As Double = 1#, Optional printBackground As Boolean = True)
+    Dim params As String, resp As String, b64 As String
+    params = "{""scale"":" & Replace(CStr(scale), ",", ".") & _
+             ",""printBackground"":" & LCase$(CStr(printBackground)) & _
+             ",""landscape"":false,""paperWidth"":8.27,""paperHeight"":11.69}"
+    resp = CDPSend(targetId, "Page.printToPDF", params)
+    b64 = JsonPick(resp, "data")
+    If Len(b64) = 0 Then Err.Raise 5, , "printToPDF returned empty data; page may require auth."
+    SaveBase64 filePath, b64
+End Sub
+
+' ---- DOM detection & action for Next → reliable ----
+Private Function HasNextButton(targetId As String) As Boolean
+    Dim js As String, resp As String
+    js = "!!document.querySelector('#pnnext')"
+    resp = EvalJSRaw(targetId, js)
+    HasNextButton = (InStr(1, resp, "true", vbTextCompare) > 0)
+End Function
+
+Private Sub ClickNext(targetId As String)
+    ' Try to click #pnnext; as fallback, try the link with aria-label="Next page"
+    Dim js As String
+    js = "var n=document.querySelector('#pnnext')||document.querySelector('a[aria-label=""Next page""]');" & _
+         "if(n){n.click(); true;}else{false;}"
+    Call EvalJSRaw(targetId, js)
+End Sub
+
+Private Function EvalJSRaw(targetId As String, js As String) As String
+    Dim p As String
+    p = "{""expression"":" & JsonStr(js) & ",""awaitPromise"":true,""returnByValue"":true}"
+    EvalJSRaw = CDPSend(targetId, "Runtime.evaluate", p)
+End Function
+
+' ====================== CDP SEND CORE ======================
+
+Private Function CDPSend(targetId As String, method As String, params As String) As String
+    Dim resp As String, sid As String, payload As String, outer As String
+    resp = BrowserSend("Target.attachToTarget", "{""targetId"":""" & targetId & """,""flatten"":true}")
+    sid = JsonPick(resp, "sessionId")
+    
+    payload = "{""id"":1,""method"":""" & method & """,""params"":" & params & "}"
+    outer = "{""sessionId"":""" & sid & """,""message"":" & JsonStr(payload) & "}"
+    resp = BrowserSend("Target.sendMessageToTarget", outer)
+    
+    BrowserSend "Target.detachFromTarget", "{""sessionId"":""" & sid & """}"
+    CDPSend = resp
+End Function
+
+Private Function BrowserSend(method As String, params As String) As String
+    Static msgId As Long
+    msgId = msgId + 1
+    Dim body As String
+    body = "{""id"":" & msgId & ",""method"":""" & method & """,""params"":" & params & "}"
+    BrowserSend = HttpPost("http://127.0.0.1:" & CDP_PORT & "/json/protocol", body, True)
+End Function
+
+' ====================== HTTP & UTIL ======================
+
+Private Function HttpGet(url As String) As String
+    Dim w As Object: Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
+    w.Open "GET", url, False
+    w.Send
+    HttpGet = w.ResponseText
+End Function
+
+Private Function HttpPost(url As String, body As String, Optional json As Boolean = True) As String
+    Dim w As Object: Set w = CreateObject("WinHttp.WinHttpRequest.5.1")
+    w.Open "POST", url, False
+    If json Then w.SetRequestHeader "Content-Type", "application/json;charset=UTF-8"
+    w.Send body
+    HttpPost = w.ResponseText
+End Function
+
+Private Function JsonStr(s As String) As String
+    s = Replace(s, "\", "\\")
+    s = Replace(s, """", "\""")
+    s = Replace(s, vbCrLf, "\n")
+    s = Replace(s, vbCr, "\n")
+    s = Replace(s, vbLf, "\n")
+    JsonStr = """" & s & """"
+End Function
+
+Private Function JsonPick(json As String, key As String) As String
+    ' very small picker for flat "key":"value"
+    Dim p As Long, q As Long
+    p = InStr(1, json, """" & key & """:", vbTextCompare)
+    If p = 0 Then Exit Function
+    p = InStr(p + Len(key) + 3, json, """")
+    q = InStr(p + 1, json, """")
+    JsonPick = Mid$(json, p + 1, q - p - 1)
+End Function
+
+Private Function URLEncode(ByVal s As String) As String
+    Dim i As Long, ch As String, o As String
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        Select Case AscW(ch)
+            Case 48 To 57, 65 To 90, 97 To 122, 45, 46, 95, 126
+                o = o & ch
+            Case Else
+                o = o & "%" & Right$("0" & Hex(AscW(ch)), 2)
+        End Select
+    Next
+    URLEncode = o
+End Function
+
+Private Function CleanFileName(s As String) As String
+    Dim bad As Variant, i As Long
+    bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+    For i = LBound(bad) To UBound(bad)
+        s = Replace(s, bad(i), "_")
+    Next
+    CleanFileName = s
+End Function
+
+Private Sub SaveBase64(path As String, b64 As String)
+    Dim stm As Object, bytes() As Byte
+    bytes = Base64Decode(b64)
+    Set stm = CreateObject("ADODB.Stream")
+    With stm
+        .Type = 1: .Open
+        .Write bytes
+        .SaveToFile path, 2
+        .Close
+    End With
+End Sub
+
+Private Function Base64Decode(ByVal sB64 As String) As Byte()
+    Dim XML As Object, Node As Object
+    Set XML = CreateObject("MSXML2.DOMDocument")
+    Set Node = XML.createElement("b64")
+    Node.DataType = "bin.base64"
+    Node.Text = sB64
+    Base64Decode = Node.nodeTypedValue
+End Function
+
+Private Sub WaitMs(ms As Long)
+    Dim t As Single: t = Timer
+    Do
+        DoEvents
+    Loop While (Timer - t) * 1000 < ms
+End Sub
